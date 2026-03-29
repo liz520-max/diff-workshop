@@ -20,7 +20,6 @@ const MAX_SCORE = 20;
 const MAX_TOTAL = MISSIONS.length * MAX_SCORE;
 const DB_PATH = "workshop_cv_v1";
 const INSTRUCTOR_PIN = "1234";
-const AI_TIMEOUT_MS = 25000;
 
 async function loadAllTeams() {
   try {
@@ -55,56 +54,206 @@ function fallbackScore(answer) {
   return Math.max(10, Math.min(20, Math.round(cvS + lgS + rsS + slS)));
 }
 
-function buildFallbackResult(answer) {
-  const t = answer.trim();
-  const cv = ["고객","헌신","책임","공감","신뢰","혁신","창의","협력","파트너","친근","투명","윤리","규정","개선","소통"];
-  const lg = ["따라서","때문에","그러므로","단계","첫째","둘째","먼저","다음으로"];
-  const rs = ["합리적","효과적","실질적","근거","구체적","전략","제안"];
-  const sl = ["해결","조치","보상","교체","환불","연락","처리","지원","대응","즉시"];
-  const cvHits = cv.filter(k => t.includes(k));
-  const lgHits = lg.filter(k => t.includes(k));
-  const rsHits = rs.filter(k => t.includes(k));
-  const slHits = sl.filter(k => t.includes(k));
-  const cvS = Math.min(10, 4 + cvHits.length * 1.2);
-  const lgS = Math.min(3.3, 1 + lgHits.length * 0.8);
-  const rsS = Math.min(3.3, 1 + rsHits.length * 0.8);
-  const slS = Math.min(3.3, 1 + slHits.length * 0.8);
-  const score = Math.max(10, Math.min(20, Math.round(cvS + lgS + rsS + slS)));
-  return {
-    score, isFallback: true,
-    breakdown: { cv_value: Math.round(cvS*10)/10, logic: Math.round(lgS*10)/10, reason: Math.round(rsS*10)/10, solution: Math.round(slS*10)/10 },
-    criteria_feedback: {
-      cv_value: { score: Math.round(cvS*10)/10, max: 10, reason: cvHits.length > 0 ? `CooperVision 핵심 키워드(${cvHits.slice(0,3).join(", ")})가 사용되었습니다. AI 채점이 불가하여 키워드 기반으로 자동 산출된 점수입니다.` : "CooperVision 가치(헌신, 공감, 협력 등) 관련 키워드가 부족합니다. AI 채점이 불가하여 키워드 기반으로 자동 산출된 점수입니다." },
-      logic:    { score: Math.round(lgS*10)/10, max: 3.3, reason: lgHits.length > 0 ? `논리 구조 키워드(${lgHits.join(", ")})가 포함되어 있습니다. 자동 산출된 점수입니다.` : "논리적 흐름을 나타내는 키워드(따라서, 먼저, 첫째 등)가 부족합니다. 자동 산출된 점수입니다." },
-      reason:   { score: Math.round(rsS*10)/10, max: 3.3, reason: rsHits.length > 0 ? `합리성 키워드(${rsHits.join(", ")})가 포함되어 있습니다. 자동 산출된 점수입니다.` : "근거나 전략을 나타내는 키워드(합리적, 구체적, 근거 등)가 부족합니다. 자동 산출된 점수입니다." },
-      solution: { score: Math.round(slS*10)/10, max: 3.3, reason: slHits.length > 0 ? `해결 방안 키워드(${slHits.join(", ")})가 포함되어 있습니다. 자동 산출된 점수입니다.` : "실행 가능한 조치를 나타내는 키워드(해결, 조치, 즉시 등)가 부족합니다. 자동 산출된 점수입니다." },
-    },
-    strengths: t.length >= 100 ? "답변의 분량이 충분하여 기본 점수가 보장되었습니다." : "",
-    improvements: "AI 채점 서버에 연결하지 못해 자동 채점되었습니다. CooperVision 가치(헌신·혁신·친근·협력)와 구체적 실행 방안을 더 명확히 담으면 실제 채점 시 더 높은 점수를 받을 수 있습니다.",
-    feedback: "자동 채점으로 대체되었습니다. 점수는 키워드 분석 기반이며 AI 재채점 시 달라질 수 있습니다.",
-  };
+
+// ── AI 채점 설정 ─────────────────────────────────────────────
+// 나중에 Claude로 교체 시 SCORING_PROVIDER를 "claude"로 변경하면 됩니다.
+const SCORING_PROVIDER = "gemini"; // "gemini" | "claude"
+const GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent";
+const CLAUDE_API_URL = "https://api.anthropic.com/v1/messages";
+
+async function callScoringAI(prompt) {
+  if (SCORING_PROVIDER === "gemini") {
+    const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+    const res = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.2, maxOutputTokens: 900 },
+      }),
+    });
+    if (!res.ok) throw new Error(`Gemini HTTP ${res.status}`);
+    const data = await res.json();
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+
+  } else {
+    // Claude (Anthropic API) — 나중에 교체 시 사용
+    const apiKey = import.meta.env.VITE_ANTHROPIC_API_KEY;
+    const res = await fetch(CLAUDE_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 900,
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+    if (!res.ok) throw new Error(`Claude HTTP ${res.status}`);
+    const data = await res.json();
+    return data.content?.map(c => c.text || "").join("") || "";
+  }
 }
 
 async function scoreWithAI(mission, caseItem, answer) {
-  if (answer.trim().length < 50) return { score: 0, isFallback: false, breakdown: { cv_value: 0, logic: 0, reason: 0, solution: 0 }, criteria_feedback: { cv_value: { score: 0, max: 10, reason: "답변이 50자 미만으로 채점되지 않습니다." }, logic: { score: 0, max: 3.3, reason: "답변이 50자 미만으로 채점되지 않습니다." }, reason: { score: 0, max: 3.3, reason: "답변이 50자 미만으로 채점되지 않습니다." }, solution: { score: 0, max: 3.3, reason: "답변이 50자 미만으로 채점되지 않습니다." } }, strengths: "", improvements: "", feedback: "답변이 50자 미만입니다." };
+  if (answer.trim().length < 50) {
+    return {
+      score: 0, isFallback: false,
+      breakdown: { cv_value: 0, logic: 0, reason: 0, solution: 0 },
+      criteria_feedback: {
+        cv_value: { score: 0, max: 10, reason: "답변이 50자 미만으로 채점되지 않습니다." },
+        logic:    { score: 0, max: 3.3, reason: "답변이 50자 미만으로 채점되지 않습니다." },
+        reason:   { score: 0, max: 3.3, reason: "답변이 50자 미만으로 채점되지 않습니다." },
+        solution: { score: 0, max: 3.3, reason: "답변이 50자 미만으로 채점되지 않습니다." },
+      },
+      strengths: "", improvements: "",
+      feedback: "답변이 50자 미만입니다. 더 구체적으로 작성해주세요.",
+    };
+  }
 
-  const prompt = `당신은 CooperVision 워크샵 전문 채점관입니다.\n\n${CV_VALUES}\n\n[이 존의 핵심 가치]\n${mission.zoneValue}\n\n[고객 불만 시나리오]\n제목: ${caseItem.title}\n고객 발언: "${caseItem.quote}"\n배경: ${caseItem.background}\n\n[미션 질문]\n${mission.question}\n\n[참가자 답변]\n${answer}\n\n=== 채점 기준 (총 20점) ===\n50자 미만 → 0점 / 50자 이상 → 최소 10점 보장\n1. CooperVision 가치/문화 부합도 (최대 10점, 50%)\n2. 논리성 (최대 3.3점, 16.7%)\n3. 설명의 합리성 (최대 3.3점, 16.7%)\n4. 해결 가능성 (최대 3.3점, 16.7%)\n\n반드시 아래 JSON만 출력:\n{"score":숫자(10-20),"breakdown":{"cv_value":숫자(0-10),"logic":숫자(0-3.3),"reason":숫자(0-3.3),"solution":숫자(0-3.3)},"criteria_feedback":{"cv_value":{"score":숫자,"max":10,"reason":"CV 가치 반영 근거 2문장"},"logic":{"score":숫자,"max":3.3,"reason":"논리 구조 근거 1-2문장"},"reason":{"score":숫자,"max":3.3,"reason":"합리성 근거 1-2문장"},"solution":{"score":숫자,"max":3.3,"reason":"해결가능성 근거 1-2문장"}},"strengths":"잘한 점 2-3문장","improvements":"개선할 점 2-3문장","feedback":"종합 피드백 2-3문장"}`;
+  const prompt = `당신은 CooperVision 워크샵 전문 채점관입니다.
 
-  const apiCall = fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 900, messages: [{ role: "user", content: prompt }] }) });
-  const timeoutP = new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), AI_TIMEOUT_MS));
+CooperVision 핵심 가치 (DIFF):
+- Dedicated: 고객에게 끝까지 헌신하고 책임지는 자세. 고객의 고통에 공감하고 즉각 행동.
+- Innovative: 창의적이고 새로운 방식으로 문제를 해결. 기존 틀을 넘는 아이디어.
+- Friendly: 따뜻하고 친근한 소통. 고객이 신뢰를 느끼는 관계 형성.
+- Partners: 내외부 협력을 통해 더 큰 해결책 도출. 팀워크와 부서 간 연대.
+
+[이 존의 핵심 가치]
+${mission.zoneValue}
+
+[고객 불만 시나리오]
+제목: ${caseItem.title}
+고객 발언: "${caseItem.quote}"
+배경: ${caseItem.background}
+
+[미션 질문]
+${mission.question}
+
+[참가자 답변]
+${answer}
+
+=== 채점 지침 ===
+중요: 키워드 유무가 아닌 문맥과 의도를 기반으로 평가하세요.
+
+1. CooperVision 가치 부합도 (0-10점, 50%):
+   - 답변이 단순히 키워드를 나열하는 것이 아니라 CooperVision의 철학과 가치를 진정으로 이해하고 실천하려는 의도가 담겨 있는가?
+   - ${mission.zoneValue.split("—")[0].trim()} 정신이 답변의 맥락과 태도에 자연스럽게 녹아있는가?
+   - 고객 중심적 사고방식이 답변 전반에 반영되어 있는가?
+
+2. 논리성 (0-3.3점, 16.7%):
+   - 단순 나열이 아닌 인과관계와 흐름이 있는가?
+   - 문제 인식에서 해결까지의 사고 과정이 체계적인가?
+
+3. 설명의 합리성 (0-3.3점, 16.7%):
+   - 제안한 해결책이 이 고객 상황에 실제로 적합한가?
+   - 고객 입장에서 납득할 수 있는 근거가 있는가?
+
+4. 해결 가능성 (0-3.3점, 16.7%):
+   - 실제 현업에서 실행 가능한 방안인가?
+   - 추상적 제안이 아닌 구체적 행동 방안이 있는가?
+
+50자 이상 답변은 최소 10점을 보장합니다.
+
+반드시 아래 JSON 형식만 출력하세요 (다른 텍스트 없이):
+{
+  "score": 숫자(10-20),
+  "breakdown": {
+    "cv_value": 숫자(0-10),
+    "logic": 숫자(0-3.3),
+    "reason": 숫자(0-3.3),
+    "solution": 숫자(0-3.3)
+  },
+  "criteria_feedback": {
+    "cv_value": {
+      "score": 숫자,
+      "max": 10,
+      "reason": "이 답변이 CooperVision 가치와 어떻게 연결되는지 또는 부족한지 문맥 기반으로 2문장 설명"
+    },
+    "logic": {
+      "score": 숫자,
+      "max": 3.3,
+      "reason": "답변의 논리 흐름에 대한 구체적 평가 1-2문장"
+    },
+    "reason": {
+      "score": 숫자,
+      "max": 3.3,
+      "reason": "해결책의 합리성과 고객 상황 적합성에 대한 평가 1-2문장"
+    },
+    "solution": {
+      "score": 숫자,
+      "max": 3.3,
+      "reason": "실행 가능성과 구체성에 대한 평가 1-2문장"
+    }
+  },
+  "strengths": "이 답변에서 진정으로 잘된 점 2-3문장. CooperVision 가치와 실질적으로 연결하여 서술.",
+  "improvements": "더 높은 점수를 받으려면 무엇을 어떻게 개선해야 하는지 2-3문장. 구체적 제안 포함.",
+  "feedback": "종합 평가 2문장."
+}`;
+
+  const TIMEOUT_MS = 15000;
+  const timeoutP = new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), TIMEOUT_MS));
+
   try {
-    const res = await Promise.race([apiCall, timeoutP]);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await Promise.race([res.json(), timeoutP]);
-    const text = data.content?.map(c => c.text || "").join("") || "";
+    const text = await Promise.race([callScoringAI(prompt), timeoutP]);
     const clean = text.replace(/```json|```/g, "").trim();
     try {
       const p = JSON.parse(clean);
-      if (typeof p.score === "number") { p.score = Math.max(10, Math.min(20, Math.round(p.score))); return { ...p, isFallback: false }; }
-      throw new Error("invalid");
-    } catch { return buildFallbackResult(answer); }
-  } catch { return buildFallbackResult(answer); }
+      if (typeof p.score === "number") {
+        p.score = Math.max(10, Math.min(20, Math.round(p.score)));
+        return { ...p, isFallback: false };
+      }
+      throw new Error("invalid shape");
+    } catch {
+      // JSON 파싱 실패 시 폴백
+      const s = clean.match(/"score"\s*:\s*(\d+)/);
+      const score = s ? Math.max(10, Math.min(20, parseInt(s[1]))) : 12;
+      return { score, isFallback: true, breakdown: null, criteria_feedback: null, strengths: "", improvements: "", feedback: "채점이 완료되었습니다." };
+    }
+  } catch {
+    // 타임아웃 또는 API 오류 → 키워드 기반 폴백
+    return buildFallbackResult(answer, mission);
+  }
 }
+
+function buildFallbackResult(answer, mission) {
+  const t = answer.trim();
+  const zoneKeywords = {
+    dedicated:  { primary: ["헌신","책임","끝까지","공감","경청","진심","죄송"], secondary: ["고객","해결","즉시","연락","조치","보상"] },
+    innovation: { primary: ["혁신","창의","새로운","아이디어","개선","시스템"], secondary: ["알림","채널","선제","예방","기술"] },
+    friendly:   { primary: ["친근","따뜻","공감","이해","배려","소통","안심"], secondary: ["감사","걱정","함께","도움"] },
+    partners:   { primary: ["협력","파트너","부서","팀워크","협업","조율"], secondary: ["영업","마케팅","CS","결제","공유"] },
+    right:      { primary: ["윤리","규정","투명","올바른","정직","준수"], secondary: ["보고","공개","기준","절차","원칙"] },
+  };
+  const zoneKw = zoneKeywords[mission.id] || zoneKeywords.dedicated;
+  const primaryHits = zoneKw.primary.filter(k => t.includes(k));
+  const secondaryHits = zoneKw.secondary.filter(k => t.includes(k));
+  const cvS = Math.min(10, Math.round((3 + primaryHits.length * 1.4 + secondaryHits.length * 0.5) * 10) / 10);
+  const lgKw = ["첫째","둘째","먼저","다음으로","따라서","그러므로","단계","결론"];
+  const rsKw = ["이유는","근거로","효과적","합리적","구체적","제안","방안"];
+  const slKw = ["즉시","바로","연락","교체","환불","보상","처리","조치","지원"];
+  const lgS = Math.min(3.3, Math.round((0.8 + lgKw.filter(k=>t.includes(k)).length * 0.7) * 10) / 10);
+  const rsS = Math.min(3.3, Math.round((0.8 + rsKw.filter(k=>t.includes(k)).length * 0.7) * 10) / 10);
+  const slS = Math.min(3.3, Math.round((0.8 + slKw.filter(k=>t.includes(k)).length * 0.6) * 10) / 10);
+  const score = Math.max(10, Math.min(20, Math.round(cvS + lgS + rsS + slS)));
+  return {
+    score, isFallback: true,
+    breakdown: { cv_value: cvS, logic: lgS, reason: rsS, solution: slS },
+    criteria_feedback: {
+      cv_value: { score: cvS, max: 10, reason: primaryHits.length > 0 ? `CooperVision 관련 표현(${primaryHits.slice(0,3).join(", ")})이 포함되었습니다. AI 연결 실패로 자동 채점되었습니다.` : `CooperVision 가치(${zoneKw.primary.slice(0,3).join(", ")}) 관련 표현이 부족합니다. AI 연결 실패로 자동 채점되었습니다.` },
+      logic:    { score: lgS, max: 3.3, reason: "AI 연결 실패로 자동 채점되었습니다. 논리적 흐름을 나타내는 표현을 추가하면 점수가 올라갑니다." },
+      reason:   { score: rsS, max: 3.3, reason: "AI 연결 실패로 자동 채점되었습니다. 해결책의 근거를 더 명확히 제시해보세요." },
+      solution: { score: slS, max: 3.3, reason: "AI 연결 실패로 자동 채점되었습니다. 구체적인 실행 방안을 포함하면 점수가 올라갑니다." },
+    },
+    strengths: t.length >= 150 ? "답변의 분량이 충분합니다." : "",
+    improvements: `AI 채점 서버에 연결하지 못해 자동 채점되었습니다. ${mission.zoneValue.split("—")[0].trim()} 가치와 구체적 실행 방안을 더 담으면 실제 채점 시 더 높은 점수를 받을 수 있습니다.`,
+    feedback: "자동 채점으로 대체되었습니다. 점수는 키워드 기반이며 AI 재채점 시 달라질 수 있습니다.",
+  };
+}
+
 
 function ProgressDots({ current }) {
   return (
@@ -350,7 +499,7 @@ function MissionScreen({ teamName, missionIndex, scores, onNext, onGoTower }) {
               {charCount < 50 ? <span style={{ fontSize: 11, color: "#F59E0B" }}>({50 - charCount}자 더 쓰면 최소 10점)</span> : <span style={{ fontSize: 11, color: "#10B981" }}>최소 10점 보장 ✓</span>}
             </div>
           </div>
-          {loading && <div style={{ background: mission.bg, borderRadius: 12, padding: "14px", marginBottom: 14, textAlign: "center" }}><div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, marginBottom: 4 }}><span style={S.spinner} /><span style={{ fontSize: 14, fontWeight: 600, color: mission.color }}>AI 채점 중...</span></div><div style={{ fontSize: 12, color: "#9CA3AF" }}>잠시 기다려주세요 (최대 25초)</div></div>}
+          {loading && <div style={{ background: mission.bg, borderRadius: 12, padding: "14px", marginBottom: 14, textAlign: "center" }}><div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, marginBottom: 4 }}><span style={S.spinner} /><span style={{ fontSize: 14, fontWeight: 600, color: mission.color }}>AI 채점 중...</span></div><div style={{ fontSize: 12, color: "#9CA3AF" }}>AI가 문맥을 분석 중입니다 (최대 15초)</div></div>}
           <button style={{ ...S.btn, background: mission.color, boxShadow: `0 4px 20px ${mission.color}44`, opacity: answer.trim() && !loading ? 1 : 0.4, cursor: answer.trim() && !loading ? "pointer" : "default" }} onClick={handleSubmit}>{loading ? "채점 중..." : "제출 & AI 채점 →"}</button>
         </div>
       )}
